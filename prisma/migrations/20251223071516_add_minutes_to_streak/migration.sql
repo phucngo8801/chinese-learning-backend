@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Streak" ADD COLUMN     "minutes" INTEGER NOT NULL DEFAULT 0,
+ALTER COLUMN "currentStreak" SET DEFAULT 1;
