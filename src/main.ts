@@ -3,9 +3,29 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import * as express from 'express';
 import { join } from 'path';
+import compression from 'compression';
+import helmet from 'helmet';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Get underlying HTTP framework instance (Express by default).
+  // This is where .set() / .disable() live.
+  const instance: any = app.getHttpAdapter().getInstance?.();
+
+  // In production behind a proxy (Vercel/Koyeb), this improves correct IP handling.
+  if (instance?.set) instance.set('trust proxy', 1);
+  if (instance?.disable) instance.disable('x-powered-by');
+
+  // Basic security headers (low overhead).
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
+
+  // Enable gzip compression for JSON.
+  app.use(compression());
 
   app.setGlobalPrefix('api');
 
@@ -19,17 +39,14 @@ async function bootstrap() {
     }),
   );
 
-  const frontendOrigin = process.env.FRONTEND_ORIGIN; // ví dụ: https://chinese-learning-frontend.vercel.app
+  const frontendOrigin = process.env.FRONTEND_ORIGIN; // e.g. https://xxx.vercel.app
 
   app.enableCors({
     origin: (origin, cb) => {
-      // requests không có origin (curl/postman) -> cho qua
       if (!origin) return cb(null, true);
 
-      // nếu bạn set FRONTEND_ORIGIN cố định -> chỉ cho phép đúng origin đó
       if (frontendOrigin && origin === frontendOrigin) return cb(null, true);
 
-      // cho phép mọi preview vercel.app (tùy bạn)
       try {
         const host = new URL(origin).hostname;
         if (host.endsWith('.vercel.app')) return cb(null, true);

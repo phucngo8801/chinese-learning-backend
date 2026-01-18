@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { cache } from '../../common/inMemoryCache';
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -14,6 +15,13 @@ function addDays(d: Date, days: number) {
   const x = new Date(d);
   x.setDate(x.getDate() + days);
   return x;
+}
+
+function localDayKey(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 @Injectable()
@@ -75,6 +83,13 @@ export class LeaderboardService {
     const now = new Date();
     const start = startOfLocalDay(addDays(now, -6));
     const end = now;
+    // Public endpoint is hit frequently; cache briefly to avoid repeated groupBy.
+    if (!meId) {
+      const key = `leaderboard:week:${localDayKey(now)}:${limit}`;
+      return cache.getOrSet(key, 30_000, async () => {
+        return this.buildLeaderboard(start, end, undefined, limit);
+      });
+    }
     return this.buildLeaderboard(start, end, meId, limit);
   }
 
@@ -83,6 +98,12 @@ export class LeaderboardService {
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth(), 1);
     const end = now;
+    if (!meId) {
+      const key = `leaderboard:month:${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}:${limit}`;
+      return cache.getOrSet(key, 30_000, async () => {
+        return this.buildLeaderboard(start, end, undefined, limit);
+      });
+    }
     return this.buildLeaderboard(start, end, meId, limit);
   }
 }
