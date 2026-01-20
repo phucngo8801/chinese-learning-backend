@@ -34,6 +34,8 @@ export class VocabController {
     @Req() req: any,
     @Query('q') q?: string,
     @Query('filter') filter?: string,
+    @Query('hsk') hsk?: string,
+    @Query('level') level?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -44,6 +46,12 @@ export class VocabController {
       filter: (filter ?? 'all') as any,
       page: Math.max(parseInt(page ?? '1', 10) || 1, 1),
       limit: Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 10), 100),
+      hsk: (() => {
+        const raw = (hsk ?? level ?? '').trim();
+        const n = parseInt(raw, 10);
+        if (!Number.isFinite(n) || n < 1) return undefined;
+        return Math.min(Math.max(n, 1), 6);
+      })(),
     });
   }
 
@@ -111,6 +119,13 @@ export class VocabController {
   ) {
     const userId: string = req.user.id;
     return this.vocabService.bulkCreateVocabForUser(userId, body);
+  }
+
+  // ✅ One-time fix: dữ liệu cũ có thể bị "level" lớn (49/100...) => chuẩn hoá về HSK 1-6.
+  // Mặc định: các giá trị invalid sẽ set về 1.
+  @Post('normalize-hsk')
+  async normalizeHsk() {
+    return this.vocabService.normalizeHskValues();
   }
 
   @Get('selected/next')

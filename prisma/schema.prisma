@@ -8,41 +8,29 @@ datasource db {
 }
 
 model User {
-  id                String   @id @default(uuid())
-  email             String   @unique
-  password          String
-  name              String
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  // Friends
-  sentFriends     Friend[]       @relation("FriendSender")
-  receivedFriends Friend[]       @relation("FriendReceiver")
-  notifications   Notification[]
-
-  // Core
-  streak     Streak?
-  activities Activity[]
-  badges     Badge[]
-
-  // Vocab
-  userVocabProgress UserVocabProgress[]
-  userVocabs        UserVocab[]
-
-  // Presence + Study
-  presence      UserPresence?
-  studySessions StudySession[]
-  studyEvents   StudyEvent[]
-
-  // Chat (DM + Group)
+  id                      String                   @id @default(uuid())
+  email                   String                   @unique
+  password                String
+  name                    String
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  activities              Activity[]
+  badges                  Badge[]
   chatConversationMembers ChatConversationMember[]
-  sentChatMessages        ChatMessage[]         @relation("ChatMessageSender")
-  receivedChatMessages    ChatMessage[]         @relation("ChatMessageReceiver")
-  chatMessageReactions    ChatMessageReaction[]
+  receivedChatMessages    ChatMessage[]            @relation("ChatMessageReceiver")
+  sentChatMessages        ChatMessage[]            @relation("ChatMessageSender")
   chatMessageHidden       ChatMessageHidden[]
-
-  // Settings
-  settings UserSettings?
+  chatMessageReactions    ChatMessageReaction[]
+  receivedFriends         Friend[]                 @relation("FriendReceiver")
+  sentFriends             Friend[]                 @relation("FriendSender")
+  notifications           Notification[]
+  streak                  Streak?
+  studyEvents             StudyEvent[]
+  studySessions           StudySession[]
+  presence                UserPresence?
+  settings                UserSettings?
+  userVocabs              UserVocab[]
+  userVocabProgress       UserVocabProgress[]
 }
 
 model Friend {
@@ -184,72 +172,57 @@ model StudyEvent {
 }
 
 model ChatConversation {
-  id            String               @id @default(uuid())
-  type          ChatConversationType @default(DM)
-
-  // DM legacy fields (used when type = DM)
+  id            String                   @id @default(uuid())
   userAId       String?
   userBId       String?
-
-  // Group fields (used when type = GROUP)
-  title         String?
+  lastMessageAt DateTime?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
   avatar        String?
   createdById   String?
+  title         String?
+  type          ChatConversationType     @default(DM)
+  members       ChatConversationMember[]
+  messages      ChatMessage[]
 
-  lastMessageAt DateTime?
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
-
-  members   ChatConversationMember[]
-  messages  ChatMessage[]
-
-  // DM uniqueness (multiple NULLs are allowed in Postgres)
   @@unique([userAId, userBId])
   @@index([type, lastMessageAt])
 }
 
 model ChatConversationMember {
-  id             String   @id @default(uuid())
+  id             String           @id @default(uuid())
   conversationId String
   userId         String
-
-  role       ChatMemberRole @default(MEMBER)
-  nickname   String?
-  joinedAt   DateTime @default(now())
-  lastReadAt DateTime?
-
-  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           ChatMemberRole   @default(MEMBER)
+  nickname       String?
+  joinedAt       DateTime         @default(now())
+  lastReadAt     DateTime?
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([conversationId, userId])
   @@index([userId, lastReadAt])
 }
 
 model ChatMessage {
-  id             String          @id @default(uuid())
+  id             String                @id @default(uuid())
   conversationId String
   senderId       String
-  receiverId     String?         // DM: set; GROUP: null
-
-  text        String
-  type        ChatMessageType @default(TEXT)
-  attachments Json?
-  editedAt    DateTime?
-  deletedAt   DateTime?
-
-  // DM read receipt (kept for backward compatibility)
-  isRead   Boolean  @default(false)
-  readAt   DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       User             @relation("ChatMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver     User?            @relation("ChatMessageReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
-
-  reactions ChatMessageReaction[]
-  hiddenBy  ChatMessageHidden[]
+  receiverId     String?
+  createdAt      DateTime              @default(now())
+  readAt         DateTime?
+  text           String
+  isRead         Boolean               @default(false)
+  attachments    Json?
+  deletedAt      DateTime?
+  editedAt       DateTime?
+  type           ChatMessageType       @default(TEXT)
+  updatedAt      DateTime              @updatedAt
+  conversation   ChatConversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  receiver       User?                 @relation("ChatMessageReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  sender         User                  @relation("ChatMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  hiddenBy       ChatMessageHidden[]
+  reactions      ChatMessageReaction[]
 
   @@index([conversationId, createdAt])
   @@index([receiverId, isRead])
@@ -258,14 +231,13 @@ model ChatMessage {
 }
 
 model ChatMessageReaction {
-  id        String   @id @default(uuid())
+  id        String      @id @default(uuid())
   messageId String
   userId    String
   emoji     String
-  createdAt DateTime @default(now())
-
-  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([messageId, userId, emoji])
   @@index([messageId, createdAt])
@@ -273,18 +245,16 @@ model ChatMessageReaction {
 }
 
 model ChatMessageHidden {
-  id        String   @id @default(uuid())
+  id        String      @id @default(uuid())
   userId    String
   messageId String
-  createdAt DateTime @default(now())
-
-  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, messageId])
   @@index([userId, createdAt])
 }
-
 
 model UserSettings {
   userId                String   @id
@@ -318,7 +288,6 @@ enum StudyItemType {
   VOCAB
   SENTENCE
 }
-
 
 enum ChatConversationType {
   DM

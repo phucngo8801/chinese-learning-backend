@@ -19,6 +19,14 @@ function addSeconds(date: Date, seconds: number) {
   return new Date(date.getTime() + seconds * 1000);
 }
 
+function clampHsk(n: unknown) {
+  const nn = Math.floor(Number(n));
+  if (!Number.isFinite(nn) || nn < 1) return 1;
+  if (nn > 6) return 6;
+  return nn;
+}
+
+
 type CatalogFilter =
   | 'all'
   | 'new'
@@ -159,9 +167,7 @@ export class VocabService {
     const zh = (body.zh ?? '').trim();
     const pinyin = (body.pinyin ?? '').trim();
     const vi = (body.vi ?? '').trim();
-    const level = Number.isFinite(body.level as number)
-      ? Number(body.level)
-      : 1;
+    const level = clampHsk(body.level ?? 1);
     const addToMyList = body.addToMyList !== false;
 
     if (!zh || !vi) return { ok: false, message: 'Thiếu zh hoặc vi' };
@@ -185,7 +191,7 @@ export class VocabService {
 
     const result = await this.prisma.$transaction(async (tx) => {
       const created = await tx.vocab.create({
-        data: { zh, pinyin, vi, level: level || 1 },
+        data: { zh, pinyin, vi, level },
       });
 
       let selected = false;
@@ -218,9 +224,7 @@ export class VocabService {
     const text = (body.text ?? '').trim();
     const delimiter = (body.delimiter ?? '|').trim() || '|';
     const addToMyList = body.addToMyList !== false;
-    const defaultLevel = Number.isFinite(body.defaultLevel as number)
-      ? Number(body.defaultLevel)
-      : 1;
+    const defaultLevel = clampHsk(body.defaultLevel ?? 1);
 
     if (!text) return { ok: false, message: 'text rỗng' };
 
@@ -287,41 +291,119 @@ export class VocabService {
     if (parsed.length === 0)
       return { ok: false, message: 'Không có dòng hợp lệ', errors };
 
-    let createdCount = 0;
-    let existedCount = 0;
-    let selectedCount = 0;
+    // Speed-up: avoid N * (findFirst + create + upsert) round-trips.
+    // Strategy:
+    // 1) prefetch all vocabs by zh
+    // 2) createMany missing (dedup)
+    // 3) refetch to get ids
+    // 4) createMany userVocab (skipDuplicates)
+    // Normalize level (HSK) to 1..6 to avoid garbage values.
+    for (const r of parsed) r.level = clampHsk(r.level);
+
+    const uniqueZh = Array.from(new Set(parsed.map((r) => r.zh)));
+    const chunk = <T,>(arr: T[], size: number) => {
+      const out: T[][] = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
+    };
+
+    const fetchExistingByZh = async () => {
+      const out: any[] = [];
+      for (const part of chunk(uniqueZh, 500)) {
+        const rows = await this.prisma.vocab.findMany({
+          where: { zh: { in: part } },
+          select: { id: true, zh: true, pinyin: true },
+        });
+        out.push(...rows);
+      }
+      return out;
+    };
+
+    const existing = await fetchExistingByZh();
+    const preIds = new Set(existing.map((v) => v.id));
+    const existingByZh = new Map<string, { id: number; pinyin: string }[]>();
+    for (const v of existing) {
+      const list = existingByZh.get(v.zh) ?? [];
+      list.push(v);
+      existingByZh.set(v.zh, list);
+    }
+
+    // Determine missing vocab entries (dedup).
+    const toCreate = new Map<
+      string,
+      { zh: string; pinyin: string; vi: string; level: number }
+    >();
 
     for (const row of parsed) {
-      const existing = await this.prisma.vocab.findFirst({
-        where: { zh: row.zh, ...(row.pinyin ? { pinyin: row.pinyin } : {}) },
-      });
+      const list = existingByZh.get(row.zh) ?? [];
+      const hasMatch = row.pinyin
+        ? list.some((v) => v.pinyin === row.pinyin)
+        : list.length > 0; // when pinyin is empty, treat any zh match as existing (same as previous logic)
 
-      let vocabId: number;
+      if (hasMatch) continue;
 
-      if (existing) {
-        existedCount++;
-        vocabId = existing.id;
-      } else {
-        const created = await this.prisma.vocab.create({
-          data: {
-            zh: row.zh,
-            pinyin: row.pinyin,
-            vi: row.vi,
-            level: row.level,
-          },
+      // Key: if pinyin empty => key is zh only (create at most 1 vocab for that zh)
+      const key = row.pinyin ? `${row.zh}\u0000${row.pinyin}` : `${row.zh}\u0000`;
+      if (!toCreate.has(key)) {
+        toCreate.set(key, {
+          zh: row.zh,
+          pinyin: row.pinyin ?? '',
+          vi: row.vi,
+          level: row.level,
         });
+      }
+    }
+
+    // Create missing in bulk (single round-trip).
+    const createData = Array.from(toCreate.values());
+    if (createData.length > 0) {
+      await this.prisma.vocab.createMany({ data: createData });
+    }
+
+    // Refetch to resolve ids (createMany doesn't return ids).
+    const after = await fetchExistingByZh();
+    const afterByZh = new Map<string, { id: number; pinyin: string }[]>();
+    for (const v of after) {
+      const list = afterByZh.get(v.zh) ?? [];
+      list.push(v);
+      afterByZh.set(v.zh, list);
+    }
+
+    const createdIds = new Set<number>();
+    for (const v of after) {
+      if (!preIds.has(v.id)) createdIds.add(v.id);
+    }
+
+    const pickMatch = (row: { zh: string; pinyin: string }) => {
+      const list = afterByZh.get(row.zh) ?? [];
+      if (row.pinyin) return list.find((v) => v.pinyin === row.pinyin) ?? null;
+      return list[0] ?? null;
+    };
+
+    let createdCount = 0;
+    let existedCount = 0;
+    const countedCreated = new Set<number>();
+    const selectedVocabIds = new Set<number>();
+
+    for (const row of parsed) {
+      const match = pickMatch(row);
+      if (!match) continue;
+
+      if (addToMyList) selectedVocabIds.add(match.id);
+
+      if (createdIds.has(match.id) && !countedCreated.has(match.id)) {
         createdCount++;
-        vocabId = created.id;
+        countedCreated.add(match.id);
+      } else {
+        existedCount++;
       }
+    }
 
-      if (addToMyList) {
-        await this.prisma.userVocab.upsert({
-          where: { userId_vocabId: { userId, vocabId } },
-          update: {},
-          create: { userId, vocabId },
-        });
-        selectedCount++;
-      }
+    if (addToMyList && selectedVocabIds.size > 0) {
+      await this.prisma.userVocab.createMany({
+        data: Array.from(selectedVocabIds).map((vocabId) => ({ userId, vocabId })),
+        skipDuplicates: true,
+      });
     }
 
     return {
@@ -330,9 +412,22 @@ export class VocabService {
       validLines: parsed.length,
       createdCount,
       existedCount,
-      selectedCount,
+      selectedCount: addToMyList ? selectedVocabIds.size : 0,
       errors,
     };
+  }
+
+
+
+  // ✅ One-time normalize existing vocab.level into HSK range (1-6).
+  // Any invalid values (<1, >6) will be set to 1.
+  async normalizeHskValues() {
+    const res = await this.prisma.vocab.updateMany({
+      where: { OR: [{ level: { lt: 1 } }, { level: { gt: 6 } }] },
+      data: { level: 1 },
+    });
+
+    return { ok: true, updatedCount: res.count };
   }
 
   // ========== (D) CATALOG ==========
@@ -360,21 +455,23 @@ export class VocabService {
 
   async getCatalogForUser(
     userId: string,
-    params: { q: string; filter: CatalogFilter; page: number; limit: number },
+    params: { q: string; filter: CatalogFilter; page: number; limit: number; hsk?: number },
   ) {
     const now = new Date();
-    const { q, filter, page, limit } = params;
+    const { q, filter, page, limit, hsk } = params;
 
     const skip = (page - 1) * limit;
     const qWhere: any = this.buildQWhere(q);
 
+    const vocabWhere: any = typeof hsk === 'number' ? { AND: [qWhere, { level: hsk }] } : qWhere;
+
     if (filter === 'selected') {
       const total = await this.prisma.userVocab.count({
-        where: { userId, vocab: qWhere },
+        where: { userId, vocab: vocabWhere },
       });
 
       const rows = await this.prisma.userVocab.findMany({
-        where: { userId, vocab: qWhere },
+        where: { userId, vocab: vocabWhere },
         include: { vocab: true },
         orderBy: { id: 'desc' },
         skip,
@@ -417,7 +514,7 @@ export class VocabService {
       filter === 'mastered' ||
       filter === 'weak'
     ) {
-      const progressWhere: any = { userId, vocab: qWhere };
+      const progressWhere: any = { userId, vocab: vocabWhere };
       if (filter === 'due') progressWhere.nextReview = { lte: now };
       if (filter === 'learning') progressWhere.box = { in: [1, 2, 3] };
       if (filter === 'mastered') progressWhere.box = { gte: 4 };
@@ -472,7 +569,7 @@ export class VocabService {
         })
       ).map((x) => x.vocabId);
 
-      const where: any = { ...qWhere };
+      const where: any = typeof hsk === 'number' ? { AND: [qWhere, { level: hsk }] } : { ...qWhere };
       if (progressedIds.length > 0) where.id = { notIn: progressedIds };
 
       const total = await this.prisma.vocab.count({ where });
@@ -503,10 +600,10 @@ export class VocabService {
     }
 
     // all
-    const total = await this.prisma.vocab.count({ where: qWhere });
+    const total = await this.prisma.vocab.count({ where: vocabWhere });
 
     const vocabs = await this.prisma.vocab.findMany({
-      where: qWhere,
+      where: vocabWhere,
       orderBy: [{ level: 'asc' }, { id: 'asc' }],
       skip,
       take: limit,
