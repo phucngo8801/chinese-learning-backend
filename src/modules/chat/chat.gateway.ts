@@ -14,8 +14,38 @@ import { ChatService } from './chat.service';
 
 type AuthedSocket = Socket & { userId?: string };
 
+// ===== WS CORS =====
+// Default behavior (DEV-friendly): allow all origins.
+// To restrict in production, explicitly set env (comma-separated):
+//   SOCKET_CORS_ORIGINS=https://your-fe.com,https://www.your-fe.com
+// Or set to '*' to allow all.
+function getAllowedWsOrigins(): string[] | null {
+  const raw = (process.env.SOCKET_CORS_ORIGINS || process.env.WS_CORS_ORIGINS || '').trim();
+  if (!raw || raw === '*') return null; // null => allow all
+  const list = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return list.length ? list : null;
+}
+
+const ALLOWED_WS_ORIGINS = getAllowedWsOrigins();
+function isAllowedWsOrigin(origin: string): boolean {
+  if (!ALLOWED_WS_ORIGINS) return true; // allow all by default
+  return ALLOWED_WS_ORIGINS.includes(origin);
+}
+
 @WebSocketGateway({
-  cors: { origin: true, credentials: true },
+  cors: {
+    origin: (origin, callback) => {
+      // Allow non-browser clients (no Origin header)
+      if (!origin) return callback(null, true);
+      if (isAllowedWsOrigin(origin)) return callback(null, true);
+      return callback(new Error('Not allowed by CORS'), false);
+    },
+    // Keep credentials true to avoid breaking environments that rely on it.
+    credentials: true,
+  },
   path: '/socket.io',
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -224,6 +254,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       text?: string;
       type?: 'TEXT' | 'IMAGE' | 'FILE';
       attachments?: any[];
+      clientMessageId?: string;
     },
   ) {
     const userId = client.userId!;
@@ -234,22 +265,30 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       | { conversationId: string; receiverIds: string[]; message: any }
       | null = null;
 
-    if (conversationId) {
-      const r = await this.chatService.sendMessageToConversation(userId, conversationId, {
-        text: body?.text,
-        type: body?.type,
-        attachments: body?.attachments,
-      });
-      result = { conversationId: r.conversation.id, receiverIds: r.receiverIds, message: r.message };
-    } else if (otherUserId) {
-      const r = await this.chatService.sendMessage(userId, otherUserId, {
-        text: body?.text,
-        type: body?.type,
-        attachments: body?.attachments,
-      });
-      result = { conversationId: r.conversation.id, receiverIds: r.receiverIds, message: r.message };
-    } else {
-      return;
+    try {
+      if (conversationId) {
+        const r = await this.chatService.sendMessageToConversation(userId, conversationId, {
+          text: body?.text,
+          type: body?.type,
+          attachments: body?.attachments,
+          clientMessageId: body?.clientMessageId,
+        });
+        result = { conversationId: r.conversation.id, receiverIds: r.receiverIds, message: r.message };
+      } else if (otherUserId) {
+        const r = await this.chatService.sendMessage(userId, otherUserId, {
+          text: body?.text,
+          type: body?.type,
+          attachments: body?.attachments,
+          clientMessageId: body?.clientMessageId,
+        });
+        result = { conversationId: r.conversation.id, receiverIds: r.receiverIds, message: r.message };
+      } else {
+        return { ok: false, error: 'Thiếu conversationId/otherUserId' };
+      }
+    } catch (e: any) {
+      const msg = e?.message || 'Gửi tin nhắn thất bại';
+      this.logger.warn(`chat:send failed: ${msg}`);
+      return { ok: false, error: msg };
     }
 
     const payload = {
@@ -265,7 +304,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.server.to(`user:${rid}`).emit('chat:new', payload);
     }
 
-    return { ok: true };
+    return { ok: true, conversationId: result.conversationId, messageId: result.message?.id };
   }
 
   // =========================

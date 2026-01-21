@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { JwtAuthGuard } from '../../shared/auth/jwt-auth.guard';
 import { ChatGateway } from './chat.gateway';
 import { ChatService } from './chat.service';
 

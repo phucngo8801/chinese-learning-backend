@@ -1,5 +1,5 @@
 import { Controller, Get, Req, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { JwtAuthGuard } from '../../shared/auth/jwt-auth.guard';
 import { BadgeService } from './badge.service';
 
 @Controller('badge')
@@ -9,6 +9,7 @@ export class BadgeController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async myBadges(@Req() req: any) {
-    return this.badgeService.getMyBadges(req.user.sub);
+    // JwtStrategy chuẩn hoá: req.user.id
+    return this.badgeService.getMyBadges(req.user.id);
   }
 }

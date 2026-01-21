@@ -1,6 +1,7 @@
 // src/modules/lessons/lessons.controller.ts
-import { Controller, Get, Post, Body } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
 import { LessonsService } from './lessons.service';
+import { JwtAuthGuard } from '../../shared/auth/jwt-auth.guard';
 
 @Controller('lessons')
 export class LessonsController {
@@ -12,6 +13,7 @@ export class LessonsController {
   }
 
   @Post()
+  @UseGuards(JwtAuthGuard)
   create(@Body() body: {
     hskLevel: number;
     vi: string;

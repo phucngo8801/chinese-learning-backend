@@ -11,6 +11,11 @@ type SendPayload = {
   text?: string;
   type?: 'TEXT' | 'IMAGE' | 'FILE';
   attachments?: any[];
+  /**
+   * FE-generated UUID used as ChatMessage.id for idempotent send.
+   * If the client retries the same message, backend will return the existing record.
+   */
+  clientMessageId?: string;
 };
 
 @Injectable()
@@ -31,6 +36,20 @@ export class ChatService {
   // ===== small helpers =====
   private normText(t?: string) {
     return (t ?? '').toString().trim();
+  }
+
+  private isUniqueViolation(e: any): boolean {
+    return !!e && typeof e === 'object' && (e as any).code === 'P2002';
+  }
+
+  private async getExistingMessageById(id: string) {
+    return this.prisma.chatMessage.findUnique({
+      where: { id },
+      include: {
+        sender: { select: { id: true, name: true, email: true } },
+        reactions: true,
+      },
+    });
   }
 
   private previewText(m: { text: string; type: any; deletedAt: any }) {
@@ -263,38 +282,87 @@ export class ChatService {
   async findOrCreateDM(meId: string, otherUserId: string) {
     if (!otherUserId || otherUserId === meId) throw new BadRequestException('Invalid user');
 
+    // Ensure stable ordering for @@unique([userAId, userBId])
+    const [userAId, userBId] = meId < otherUserId ? [meId, otherUserId] : [otherUserId, meId];
+
     const other = await this.prisma.user.findUnique({
       where: { id: otherUserId },
       select: { id: true },
     });
     if (!other) throw new NotFoundException('User không tồn tại');
 
-    const existing = await this.prisma.chatConversation.findFirst({
+    // Fast path: DM already keyed by (userAId, userBId)
+    const keyed = await this.prisma.chatConversation.findFirst({
+      where: { type: ChatConversationType.DM, userAId, userBId },
+      include: { members: true },
+    });
+    if (keyed) return keyed;
+
+    // Legacy path: DM created before userAId/userBId were used
+    const legacy = await this.prisma.chatConversation.findFirst({
       where: {
         type: ChatConversationType.DM,
-        members: {
-          every: { userId: { in: [meId, otherUserId] } },
-        },
+        AND: [
+          { members: { some: { userId: meId } } },
+          { members: { some: { userId: otherUserId } } },
+        ],
       },
       include: { members: true },
     });
 
-    if (existing && existing.members.length === 2) return existing;
+    if (legacy && legacy.members.length === 2) {
+      // Backfill unique key if missing to prevent duplicates going forward
+      if (!legacy.userAId || !legacy.userBId) {
+        try {
+          return await this.prisma.chatConversation.update({
+            where: { id: legacy.id },
+            data: { userAId, userBId },
+            include: { members: true },
+          });
+        } catch (e: any) {
+          // Another request may have created/updated concurrently
+          if (e?.code === 'P2002') {
+            const existing2 = await this.prisma.chatConversation.findFirst({
+              where: { type: ChatConversationType.DM, userAId, userBId },
+              include: { members: true },
+            });
+            if (existing2) return existing2;
+          }
+          throw e;
+        }
+      }
+      return legacy;
+    }
 
-    return this.prisma.chatConversation.create({
-      data: {
-        type: ChatConversationType.DM,
-        createdById: meId,
-        members: {
-          createMany: {
-            data: [
-              { userId: meId, role: ChatMemberRole.MEMBER },
-              { userId: otherUserId, role: ChatMemberRole.MEMBER },
-            ],
+    // Create new keyed DM; handle race via unique constraint
+    try {
+      return await this.prisma.chatConversation.create({
+        data: {
+          type: ChatConversationType.DM,
+          userAId,
+          userBId,
+          createdById: meId,
+          members: {
+            createMany: {
+              data: [
+                { userId: meId, role: ChatMemberRole.MEMBER },
+                { userId: otherUserId, role: ChatMemberRole.MEMBER },
+              ],
+            },
           },
         },
-      },
-    });
+        include: { members: true },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') {
+        const existing2 = await this.prisma.chatConversation.findFirst({
+          where: { type: ChatConversationType.DM, userAId, userBId },
+          include: { members: true },
+        });
+        if (existing2) return existing2;
+      }
+      throw e;
+    }
   }
 
   // endpoint /chat/with/:otherUserId (FE tạo chat)
@@ -378,20 +446,36 @@ export class ChatService {
     const hasAttachments = Array.isArray(payload?.attachments) && payload.attachments.length > 0;
     if (!text && !hasAttachments) throw new BadRequestException('Tin nhắn rỗng');
 
-    const msgRaw = await this.prisma.chatMessage.create({
-      data: {
-        conversationId: conv.id,
-        senderId,
-        receiverId,
-        text,
-        type: (payload?.type || 'TEXT') as any,
-        attachments: payload?.attachments ?? undefined,
-      },
-      include: {
-        sender: { select: { id: true, name: true, email: true } },
-        reactions: true,
-      },
-    });
+    const clientMessageId = payload?.clientMessageId?.toString().trim();
+    let msgRaw: any;
+
+    try {
+      msgRaw = await this.prisma.chatMessage.create({
+        data: {
+          id: clientMessageId || undefined,
+          conversationId: conv.id,
+          senderId,
+          receiverId,
+          text,
+          type: (payload?.type || 'TEXT') as any,
+          attachments: payload?.attachments ?? undefined,
+        },
+        include: {
+          sender: { select: { id: true, name: true, email: true } },
+          reactions: true,
+        },
+      });
+    } catch (e: any) {
+      if (clientMessageId && this.isUniqueViolation(e)) {
+        const existing = await this.getExistingMessageById(clientMessageId);
+        if (!existing) throw e;
+        if (existing.senderId !== senderId) throw new ForbiddenException('Không hợp lệ');
+        msgRaw = existing;
+      } else {
+        throw e;
+      }
+    }
+
 
     const [msg] = await this.attachSenderDisplayName(conv.id, [msgRaw]);
 
@@ -434,20 +518,36 @@ export class ChatService {
       receiverId = null;
     }
 
-    const msgRaw = await this.prisma.chatMessage.create({
-      data: {
-        conversationId,
-        senderId,
-        receiverId: receiverId ?? undefined,
-        text,
-        type: (payload?.type || 'TEXT') as any,
-        attachments: payload?.attachments ?? undefined,
-      },
-      include: {
-        sender: { select: { id: true, name: true, email: true } },
-        reactions: true,
-      },
-    });
+    const clientMessageId = payload?.clientMessageId?.toString().trim();
+    let msgRaw: any;
+
+    try {
+      msgRaw = await this.prisma.chatMessage.create({
+        data: {
+          id: clientMessageId || undefined,
+          conversationId,
+          senderId,
+          receiverId: receiverId ?? undefined,
+          text,
+          type: (payload?.type || 'TEXT') as any,
+          attachments: payload?.attachments ?? undefined,
+        },
+        include: {
+          sender: { select: { id: true, name: true, email: true } },
+          reactions: true,
+        },
+      });
+    } catch (e: any) {
+      if (clientMessageId && this.isUniqueViolation(e)) {
+        const existing = await this.getExistingMessageById(clientMessageId);
+        if (!existing) throw e;
+        if (existing.senderId !== senderId) throw new ForbiddenException('Không hợp lệ');
+        msgRaw = existing;
+      } else {
+        throw e;
+      }
+    }
+
 
     const [msg] = await this.attachSenderDisplayName(conversationId, [msgRaw]);
 
