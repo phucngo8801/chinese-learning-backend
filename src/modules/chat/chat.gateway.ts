@@ -299,9 +299,29 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // broadcast to chat room
     this.server.to(`chat:${result.conversationId}`).emit('chat:new', payload);
 
-    // also push to personal rooms (for users not currently joined)
+    // Also push to personal rooms for users not currently inside this chat room.
+    // Rationale: a user who is currently viewing the conversation has sockets in BOTH rooms
+    // (user:<id> and chat:<conversationId>). Without this guard they may receive duplicate
+    // chat:new events and the UI can render duplicates or glitch.
+    const chatRoom = `chat:${result.conversationId}`;
+    const chatSockets = (this.server.sockets.adapter.rooms.get(chatRoom) || new Set<string>()) as Set<string>;
+
     for (const rid of result.receiverIds || []) {
-      this.server.to(`user:${rid}`).emit('chat:new', payload);
+      const userRoom = `user:${rid}`;
+      const userSockets = (this.server.sockets.adapter.rooms.get(userRoom) || new Set<string>()) as Set<string>;
+
+      // If any of this user's sockets are already in the chat room, skip personal emit.
+      let alreadyInChat = false;
+      for (const sid of userSockets) {
+        if (chatSockets.has(sid)) {
+          alreadyInChat = true;
+          break;
+        }
+      }
+
+      if (!alreadyInChat) {
+        this.server.to(userRoom).emit('chat:new', payload);
+      }
     }
 
     return { ok: true, conversationId: result.conversationId, messageId: result.message?.id };
@@ -312,7 +332,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // =========================
   public emitChatMessageUpdate(conversationId: string, payload: any) {
     this.server.to(`chat:${conversationId}`).emit('chat:update', payload);
-    this.server.to(`chat:${conversationId}`).emit('chat:new', payload); // optional fallback
+    // IMPORTANT: Do NOT emit chat:new for update payloads (EDIT/DELETE/REACTIONS/etc.).
+    // FE already listens to chat:update and treating update payloads as chat:new can
+    // cause duplicate messages or accidental UI removal due to shape mismatch.
   }
 
   public emitMessageHidden(userId: string, payload: any) {
