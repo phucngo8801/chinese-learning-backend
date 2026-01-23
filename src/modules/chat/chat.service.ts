@@ -5,7 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { ChatConversationType, ChatMemberRole } from '@prisma/client';
+import { ChatConversationType, ChatMemberRole, Prisma } from '@prisma/client';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 type SendPayload = {
   text?: string;
@@ -21,6 +23,30 @@ type SendPayload = {
 @Injectable()
 export class ChatService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private async removeChatAttachmentFiles(attachments: any) {
+    const items = Array.isArray(attachments)
+      ? attachments
+      : attachments
+        ? [attachments]
+        : [];
+
+    await Promise.allSettled(
+      items.map(async (a: any) => {
+        const url = a?.url;
+        if (!url || typeof url !== 'string') return;
+        const m = url.match(/\/uploads\/chat\/([^?#]+)/);
+        if (!m) return;
+        const filename = m[1];
+        const fullPath = path.join(process.cwd(), 'uploads', 'chat', filename);
+        try {
+          await fs.unlink(fullPath);
+        } catch {
+          // ignore missing files
+        }
+      }),
+    );
+  }
 
   /**
    * Fast helper for gateway emits.
@@ -750,14 +776,17 @@ export class ChatService {
   async revokeMessage(userId: string, messageId: string) {
     const msg = await this.prisma.chatMessage.findUnique({
       where: { id: messageId },
-      select: { id: true, senderId: true, conversationId: true },
+      select: { id: true, senderId: true, conversationId: true, attachments: true },
     });
     if (!msg) throw new NotFoundException('Tin nhắn không tồn tại');
     if (msg.senderId !== userId) throw new ForbiddenException('Không có quyền thu hồi');
 
+    // Free disk space early for revoked messages that contain attachments
+    await this.removeChatAttachmentFiles((msg as any).attachments);
+
     const updatedRaw = await this.prisma.chatMessage.update({
       where: { id: messageId },
-      data: { text: '', deletedAt: new Date() },
+      data: { text: '', deletedAt: new Date(), attachments: Prisma.DbNull },
       include: {
         sender: { select: { id: true, name: true, email: true } },
         reactions: true,
