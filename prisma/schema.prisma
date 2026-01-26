@@ -31,6 +31,7 @@ model User {
   settings                UserSettings?
   userVocabs              UserVocab[]
   userVocabProgress       UserVocabProgress[]
+  dailyGates              DailyGate[]
 }
 
 model Friend {
@@ -112,6 +113,30 @@ model Vocab {
   level             Int
   userVocabs        UserVocab[]
   userVocabProgress UserVocabProgress[]
+  dailyGates         DailyGate[]
+}
+
+model DailyGate {
+  id             String   @id @default(uuid())
+  userId         String
+  dateKey        String
+  vocabId        Int?
+  phraseZh       String
+  phrasePinyin   String
+  phraseVi       String
+  threshold      Int      @default(80)
+  bestScore      Int      @default(0)
+  rerollCount    Int      @default(0)
+  passedAt       DateTime?
+  lastTranscript String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocab Vocab? @relation(fields: [vocabId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, dateKey])
+  @@index([userId, passedAt])
 }
 
 model UserVocabProgress {

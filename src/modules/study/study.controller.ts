@@ -16,4 +16,32 @@ export class StudyController {
   async friendsToday(@Req() req: any) {
     return this.studyService.friendsToday(req.user.id);
   }
+
+  @Get('summary/today')
+  async summaryToday(@Req() req: any) {
+    return this.studyService.summaryToday(req.user.id);
+  }
+
+  @Get('summary/week')
+  async summaryWeek(@Req() req: any) {
+    return this.studyService.summaryWeek(req.user.id, 7);
+  }
+
+  /**
+   * Daily Gate: bắt buộc đọc đúng 1 cụm/từ mỗi ngày trước khi vào học.
+   */
+  @Get('daily-gate')
+  async dailyGate(@Req() req: any) {
+    return this.studyService.getDailyGate(req.user.id);
+  }
+
+  @Post('daily-gate/submit')
+  async submitDailyGate(@Req() req: any, @Body() body: any) {
+    return this.studyService.submitDailyGate(req.user.id, body);
+  }
+  @Post('daily-gate/reroll')
+  async rerollDailyGate(@Req() req: any) {
+    return this.studyService.rerollDailyGate(req.user.id);
+  }
+
 }
