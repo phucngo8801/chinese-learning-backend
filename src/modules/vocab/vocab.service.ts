@@ -12,8 +12,22 @@ const BOX_INTERVAL_DAYS: Record<number, number> = {
   6: 30,
 };
 
+// For "Hard" grading: schedule an earlier re-check without dropping the box.
+// Minutes (not days) so users can re-see hard items within the same day.
+const HARD_INTERVAL_MINUTES: Record<number, number> = {
+  1: 10, // if user is still at box 1, check again soon
+  2: 60,
+  3: 180,
+  4: 360,
+  5: 720,
+  6: 1440,
+};
+
 function addDays(date: Date, days: number) {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+}
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
 }
 function addSeconds(date: Date, seconds: number) {
   return new Date(date.getTime() + seconds * 1000);
@@ -88,7 +102,18 @@ export class VocabService {
     return this.prisma.vocab.findUnique({ where: { id: next.vocabId } });
   }
 
-  async recordResult(userId: string, vocabId: number, correct: boolean) {
+  /**
+   * Record SRS result.
+   * Backward-compatible:
+   * - Old clients send {correct: boolean} => mapped to grade 2 (good) or 0 (again).
+   * - New clients can send grade:
+   *   0=again, 1=hard, 2=good, 3=easy.
+   */
+  async recordResult(
+    userId: string,
+    vocabId: number,
+    input: { correct: boolean; grade?: number },
+  ) {
     const now = new Date();
 
     const existing = await this.prisma.userVocabProgress.findUnique({
@@ -98,22 +123,43 @@ export class VocabService {
 
     const prevBox = existing?.box ?? 1;
 
+    // grade: 0=again, 1=hard, 2=good, 3=easy
+    const rawGrade =
+      typeof input.grade === 'number' && Number.isFinite(input.grade)
+        ? Math.round(input.grade)
+        : input.correct
+        ? 2
+        : 0;
+    const grade = Math.min(Math.max(rawGrade, 0), 3);
+
     let newBox = prevBox;
     let nextReview: Date;
 
-    if (correct) {
+    if (grade === 0) {
+      // Again
+      newBox = 1;
+      nextReview = addSeconds(now, 30);
+    } else if (grade === 1) {
+      // Hard: keep the box, but review sooner
+      newBox = Math.min(Math.max(prevBox, 1), MAX_BOX);
+      nextReview = addMinutes(now, HARD_INTERVAL_MINUTES[newBox] ?? 60);
+    } else if (grade === 2) {
+      // Good
       newBox = Math.min(prevBox + 1, MAX_BOX);
       nextReview = addDays(now, BOX_INTERVAL_DAYS[newBox] ?? 30);
     } else {
-      newBox = 1;
-      nextReview = addSeconds(now, 30);
+      // Easy
+      newBox = Math.min(prevBox + 2, MAX_BOX);
+      nextReview = addDays(now, BOX_INTERVAL_DAYS[newBox] ?? 30);
     }
+
+    const isCorrect = grade > 0;
 
     return this.prisma.userVocabProgress.upsert({
       where: { userId_vocabId: { userId, vocabId } },
       update: {
-        correct: correct ? { increment: 1 } : undefined,
-        wrong: !correct ? { increment: 1 } : undefined,
+        correct: isCorrect ? { increment: 1 } : undefined,
+        wrong: !isCorrect ? { increment: 1 } : undefined,
         lastSeen: now,
         box: newBox,
         nextReview,
@@ -121,13 +167,60 @@ export class VocabService {
       create: {
         userId,
         vocabId,
-        correct: correct ? 1 : 0,
-        wrong: correct ? 0 : 1,
+        correct: isCorrect ? 1 : 0,
+        wrong: isCorrect ? 0 : 1,
         lastSeen: now,
         box: newBox,
         nextReview,
       },
     });
+  }
+
+  /**
+   * Due-only review queue for SRS.
+   * Used by FE "Ôn tập hôm nay".
+   */
+  async getReviewQueueForUser(userId: string, limit = 20) {
+    const now = new Date();
+
+    const dueCount = await this.prisma.userVocabProgress.count({
+      where: { userId, nextReview: { lte: now } },
+    });
+
+    const progresses = await this.prisma.userVocabProgress.findMany({
+      where: { userId, nextReview: { lte: now } },
+      include: { vocab: true },
+      orderBy: [{ box: 'asc' }, { wrong: 'desc' }, { nextReview: 'asc' }],
+      take: limit,
+    });
+
+    const nextUp =
+      dueCount === 0
+        ? await this.prisma.userVocabProgress.findFirst({
+            where: { userId },
+            orderBy: { nextReview: 'asc' },
+            select: { nextReview: true },
+          })
+        : null;
+
+    const items = progresses.map((p) => ({
+      ...p.vocab,
+      progress: {
+        box: p.box,
+        nextReview: p.nextReview,
+        correct: p.correct,
+        wrong: p.wrong,
+        lastSeen: p.lastSeen,
+      },
+      status: this.computeStatus(p, now),
+    }));
+
+    return {
+      ok: true,
+      dueCount,
+      nextUpAt: nextUp?.nextReview ?? null,
+      items,
+    };
   }
 
   // ========== (B) GET 1 VOCAB ==========

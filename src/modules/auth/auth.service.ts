@@ -14,20 +14,20 @@ export class AuthService {
     private readonly jwtService: JwtService,
   ) {}
 
-  async register(email: string, password: string, name: string) {
+  async register(identifier: string, password: string, name: string) {
     if (!name || name.trim() === '') {
       throw new BadRequestException('Name is required');
     }
 
-    const existing = await this.usersService.findByEmail(email);
+    const existing = await this.usersService.findByEmail(identifier);
     if (existing) {
-      throw new BadRequestException('Email already exists');
+      throw new BadRequestException('Username already exists');
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await this.usersService.create({
-      email,
+      email: identifier,
       password: hashedPassword,
       name,
     });
@@ -39,16 +39,16 @@ export class AuthService {
     };
   }
 
-  async login(email: string, password: string) {
-    const user = await this.usersService.findByEmail(email);
+  async login(identifier: string, password: string) {
+    const user = await this.usersService.findByEmail(identifier);
 
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Invalid username or password');
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Invalid username or password');
     }
 
     const payload = { sub: user.id, email: user.email };

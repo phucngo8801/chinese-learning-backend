@@ -29,6 +29,18 @@ export class VocabController {
     return this.vocabService.getRandomForUser(userId);
   }
 
+  /**
+   * SRS review queue for "Ôn tập hôm nay".
+   * - Returns only due items (nextReview <= now)
+   * - If dueCount = 0, nextUpAt will hint the next upcoming review time.
+   */
+  @Get('review/queue')
+  async reviewQueue(@Req() req: any, @Query('limit') limit?: string) {
+    const userId: string = req.user.id;
+    const n = Math.min(Math.max(parseInt(limit ?? '20', 10) || 20, 1), 100);
+    return this.vocabService.getReviewQueueForUser(userId, n);
+  }
+
   @Get('catalog')
   async catalog(
     @Req() req: any,
@@ -64,21 +76,36 @@ export class VocabController {
   @Post('result')
   async result(
     @Req() req: any,
-    @Body() body: { vocabId: number; correct: boolean; durationSec?: number },
+    @Body()
+    body: {
+      vocabId: number;
+      // legacy
+      correct?: boolean;
+      // new grading: 0=again, 1=hard, 2=good, 3=easy
+      grade?: number;
+      durationSec?: number;
+    },
   ) {
     const userId: string = req.user.id;
     const durationSec = Math.max(0, Number(body.durationSec ?? 0));
 
+    const hasGrade = typeof body.grade === 'number' && Number.isFinite(body.grade);
+    const grade = hasGrade
+      ? Math.min(Math.max(Math.round(Number(body.grade)), 0), 3)
+      : undefined;
+
+    const correct = grade !== undefined ? grade > 0 : !!body.correct;
+
     const progress = await this.vocabService.recordResult(
       userId,
       body.vocabId,
-      !!body.correct,
+      { correct, grade },
     );
 
     // ✅ log studyEvent để friends/today tổng hợp đúng/sai + phút
     await this.studyService.logEvent(userId, {
       type: 'VOCAB',
-      correct: !!body.correct,
+      correct,
       durationSec,
       itemId: String(body.vocabId),
     });

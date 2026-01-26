@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
 
 @Controller('auth')
@@ -9,22 +9,32 @@ export class AuthController {
   register(
     @Body()
     dto: {
-      email: string;
+      // FE mới dùng `username`; vẫn giữ `email` để tương thích client cũ
+      username?: string;
+      email?: string;
       password: string;
       name: string;
     },
   ) {
-    return this.authService.register(dto.email, dto.password, dto.name);
+    const identifier = dto.username ?? dto.email;
+    if (!identifier) throw new BadRequestException('Username is required');
+
+    return this.authService.register(identifier, dto.password, dto.name);
   }
 
   @Post('login')
   login(
     @Body()
     dto: {
-      email: string;
+      // FE mới dùng `username`; vẫn giữ `email` để tương thích client cũ
+      username?: string;
+      email?: string;
       password: string;
     },
   ) {
-    return this.authService.login(dto.email, dto.password);
+    const identifier = dto.username ?? dto.email;
+    if (!identifier) throw new BadRequestException('Username is required');
+
+    return this.authService.login(identifier, dto.password);
   }
 }
