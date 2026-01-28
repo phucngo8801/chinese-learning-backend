@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "DailyGate" ADD COLUMN     "failCount" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "DailyGate" ADD COLUMN     "skipUsed" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "DailyGate" ADD COLUMN     "skippedAt" TIMESTAMP(3);

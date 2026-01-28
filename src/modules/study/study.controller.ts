@@ -44,4 +44,10 @@ export class StudyController {
     return this.studyService.rerollDailyGate(req.user.id);
   }
 
+
+  @Post('daily-gate/skip')
+  async skipDailyGate(@Req() req: any) {
+    return this.studyService.skipDailyGate(req.user.id);
+  }
+
 }

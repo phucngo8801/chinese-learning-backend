@@ -317,13 +317,31 @@ export class StudyService {
 
   /* ---------------- DAILY GATE ---------------- */
 
-  private getDailyGateThreshold() {
+  private getDailyGateThresholdBase() {
     // Default: 80% (khá dễ mà vẫn có ý nghĩa)
     return clampInt(process.env.DAILY_GATE_THRESHOLD, 50, 95, 80);
   }
 
+  private getDailyGateThresholdFloor() {
+    // "Sàn" auto-easy: không hạ thấp hơn mức này (default: 65)
+    return clampInt(process.env.DAILY_GATE_THRESHOLD_FLOOR, 0, 100, 65);
+  }
+
+  private getDailyGateAutoEasyStep() {
+    // Mỗi lần fail sẽ hạ ngưỡng bớt step (default: 5)
+    return clampInt(process.env.DAILY_GATE_AUTO_EASY_STEP, 0, 20, 5);
+  }
+
   private getDailyGateRerollLimit() {
     return clampInt(process.env.DAILY_GATE_REROLL_LIMIT, 0, 20, 5);
+  }
+
+  private computeEffectiveThreshold(base: number, failCount: number) {
+    const floor = this.getDailyGateThresholdFloor();
+    const step = this.getDailyGateAutoEasyStep();
+    const safeFail = Math.max(0, Math.round(failCount || 0));
+    const raw = base - step * safeFail;
+    return Math.max(floor, Math.min(100, raw));
   }
 
   private async pickDailyGatePhrase(userId: string): Promise<{
@@ -385,7 +403,7 @@ export class StudyService {
     // 3) Fallback: random vocab toàn hệ thống
     const total = await this.prisma.vocab.count();
     if (total <= 0) {
-      // Should not happen in real data, but keep the endpoint safe
+      // Keep endpoint safe
       return { zh: '你好', pinyin: 'ni hao', vi: 'xin chào', source: 'RANDOM' };
     }
     const skip = Math.floor(Math.random() * total);
@@ -414,27 +432,55 @@ export class StudyService {
     const now = new Date();
     const today = startOfLocalDay(now);
     const dateKey = dateKeyLocal(today);
-    const threshold = this.getDailyGateThreshold();
+
+    const thresholdBase = this.getDailyGateThresholdBase();
+    const thresholdFloor = this.getDailyGateThresholdFloor();
+    const autoEasyStep = this.getDailyGateAutoEasyStep();
+    const rerollLimit = this.getDailyGateRerollLimit();
 
     const existing = await this.prisma.dailyGate.findUnique({
       where: { userId_dateKey: { userId, dateKey } },
     });
 
     if (existing) {
+      const failCount = (existing as any).failCount ?? 0;
+      const base = (existing as any).threshold ?? thresholdBase;
+      const threshold = this.computeEffectiveThreshold(base, failCount);
+
+      const rerollCount = (existing as any).rerollCount ?? 0;
+      const rerollLeft = Math.max(0, rerollLimit - rerollCount);
+
+      const skipUsed = !!(existing as any).skipUsed;
+      const skippedAt = (existing as any).skippedAt ?? null;
+
       return {
         ok: true,
         dateKey,
-        threshold: existing.threshold ?? threshold,
+
+        threshold,
+        thresholdBase: base,
+        thresholdFloor,
+        autoEasyStep,
+        failCount,
+
         passed: !!existing.passedAt,
         passedAt: existing.passedAt,
-        bestScore: existing.bestScore ?? 0,
-        rerollCount: (existing as any).rerollCount ?? 0,
-        rerollLimit: this.getDailyGateRerollLimit(),
+
+        skipped: skipUsed,
+        skippedAt,
+        skipLeft: skipUsed ? 0 : 1,
+
+        bestScore: (existing as any).bestScore ?? 0,
+
+        rerollCount,
+        rerollLimit,
+        rerollLeft,
+
         phrase: {
-          vocabId: existing.vocabId ?? null,
-          zh: existing.phraseZh,
-          pinyin: existing.phrasePinyin,
-          vi: existing.phraseVi,
+          vocabId: (existing as any).vocabId ?? null,
+          zh: (existing as any).phraseZh,
+          pinyin: (existing as any).phrasePinyin,
+          vi: (existing as any).phraseVi,
         },
       };
     }
@@ -449,29 +495,133 @@ export class StudyService {
         phraseZh: phrase.zh,
         phrasePinyin: phrase.pinyin,
         phraseVi: phrase.vi,
-        threshold,
+        threshold: thresholdBase,
         bestScore: 0,
-      },
+        rerollCount: 0,
+        failCount: 0,
+        skipUsed: false,
+      } as any,
     });
 
     return {
       ok: true,
       dateKey,
-      threshold: created.threshold,
+
+      threshold: thresholdBase,
+      thresholdBase,
+      thresholdFloor,
+      autoEasyStep,
+      failCount: 0,
+
       passed: false,
       passedAt: null,
+
+      skipped: false,
+      skippedAt: null,
+      skipLeft: 1,
+
       bestScore: 0,
-      rerollCount: (created as any).rerollCount ?? 0,
-      rerollLimit: this.getDailyGateRerollLimit(),
+
+      rerollCount: 0,
+      rerollLimit,
+      rerollLeft: rerollLimit,
+
       phrase: {
-        vocabId: created.vocabId,
-        zh: created.phraseZh,
-        pinyin: created.phrasePinyin,
-        vi: created.phraseVi,
+        vocabId: (created as any).vocabId ?? null,
+        zh: (created as any).phraseZh,
+        pinyin: (created as any).phrasePinyin,
+        vi: (created as any).phraseVi,
       },
     };
   }
 
+  /**
+   * Skip gate 1 lần/ngày để vẫn vào học được (không bị block).
+   * Skip sẽ được ghi trạng thái để sau này có thể "phạt" skip (không tính streak, v.v.).
+   */
+  async skipDailyGate(userId: string) {
+    const now = new Date();
+    const today = startOfLocalDay(now);
+    const dateKey = dateKeyLocal(today);
+
+    const thresholdBase = this.getDailyGateThresholdBase();
+    const thresholdFloor = this.getDailyGateThresholdFloor();
+    const autoEasyStep = this.getDailyGateAutoEasyStep();
+    const rerollLimit = this.getDailyGateRerollLimit();
+
+    const existing = await this.prisma.dailyGate.findUnique({
+      where: { userId_dateKey: { userId, dateKey } },
+    });
+
+    if (!existing) {
+      const phrase = await this.pickDailyGatePhrase(userId);
+
+      const created = await this.prisma.dailyGate.create({
+        data: {
+          userId,
+          dateKey,
+          vocabId: phrase.vocabId ?? null,
+          phraseZh: phrase.zh,
+          phrasePinyin: phrase.pinyin,
+          phraseVi: phrase.vi,
+          threshold: thresholdBase,
+          bestScore: 0,
+          rerollCount: 0,
+          failCount: 0,
+          skipUsed: true,
+          skippedAt: now,
+        } as any,
+      });
+
+      return {
+        ok: true,
+        dateKey,
+
+        threshold: thresholdBase,
+        thresholdBase,
+        thresholdFloor,
+        autoEasyStep,
+        failCount: 0,
+
+        passed: false,
+        passedAt: null,
+
+        skipped: true,
+        skippedAt: now,
+        skipLeft: 0,
+
+        bestScore: 0,
+
+        rerollCount: 0,
+        rerollLimit,
+        rerollLeft: rerollLimit,
+
+        phrase: {
+          vocabId: (created as any).vocabId ?? null,
+          zh: (created as any).phraseZh,
+          pinyin: (created as any).phrasePinyin,
+          vi: (created as any).phraseVi,
+        },
+      };
+    }
+
+    // Nếu đã pass thì coi như OK, không cần/không cho skip nữa
+    if (existing.passedAt) {
+      return this.getDailyGate(userId);
+    }
+
+    // Nếu đã skip rồi => return trạng thái
+    if ((existing as any).skipUsed) {
+      return this.getDailyGate(userId);
+    }
+
+    await this.prisma.dailyGate.update({
+      where: { id: (existing as any).id },
+      data: { skipUsed: true, skippedAt: now } as any,
+    });
+
+    return this.getDailyGate(userId);
+  }
 
   /**
    * Đổi sang câu/ từ khác nếu câu hiện tại quá khó.
@@ -481,8 +631,9 @@ export class StudyService {
     const now = new Date();
     const today = startOfLocalDay(now);
     const dateKey = dateKeyLocal(today);
-    const threshold = this.getDailyGateThreshold();
-    const limit = this.getDailyGateRerollLimit();
+
+    const thresholdBase = this.getDailyGateThresholdBase();
+    const rerollLimit = this.getDailyGateRerollLimit();
 
     const existing = await this.prisma.dailyGate.findUnique({
       where: { userId_dateKey: { userId, dateKey } },
@@ -494,34 +645,19 @@ export class StudyService {
       return this.rerollDailyGate(userId);
     }
 
-    // If already passed, do not allow reroll (keep consistency)
-    if (existing.passedAt) {
-      return {
-        ok: true,
-        dateKey,
-        threshold: existing.threshold ?? threshold,
-        passed: true,
-        passedAt: existing.passedAt,
-        bestScore: existing.bestScore ?? 0,
-        rerollCount: (existing as any).rerollCount ?? 0,
-        rerollLimit: limit,
-        phrase: {
-          vocabId: existing.vocabId ?? null,
-          zh: existing.phraseZh,
-          pinyin: existing.phrasePinyin,
-          vi: existing.phraseVi,
-        },
-      };
+    // Nếu đã pass hoặc đã skip => không cho reroll (để trạng thái "cả ngày học bình thường" nhất quán)
+    if (existing.passedAt || (existing as any).skipUsed) {
+      return this.getDailyGate(userId);
     }
 
     const rerollCount = (existing as any).rerollCount ?? 0;
-    if (limit > 0 && rerollCount >= limit) {
+    if (rerollLimit > 0 && rerollCount >= rerollLimit) {
       throw new BadRequestException('Hết lượt đổi câu hôm nay.');
     }
 
     // Pick an easier random vocab (default: level <= 2)
     const maxLevel = clampInt(process.env.DAILY_GATE_MAX_LEVEL, 1, 10, 2);
-    const excludeIds = existing.vocabId ? [existing.vocabId] : [];
+    const excludeIds = (existing as any).vocabId ? [(existing as any).vocabId] : [];
 
     const whereBase: any = {
       ...(maxLevel ? { level: { lte: maxLevel } } : {}),
@@ -557,42 +693,33 @@ export class StudyService {
       }
     }
 
-    const updated = await this.prisma.dailyGate.update({
-      where: { id: existing.id },
+    await this.prisma.dailyGate.update({
+      where: { id: (existing as any).id },
       data: {
         vocabId: v?.id ?? null,
-        phraseZh: v?.zh || existing.phraseZh,
-        phrasePinyin: v?.pinyin || existing.phrasePinyin,
-        phraseVi: v?.vi || existing.phraseVi,
+        phraseZh: v?.zh || (existing as any).phraseZh,
+        phrasePinyin: v?.pinyin || (existing as any).phrasePinyin,
+        phraseVi: v?.vi || (existing as any).phraseVi,
         bestScore: 0,
         lastTranscript: null,
         passedAt: null,
         rerollCount: rerollCount + 1,
-        threshold: existing.threshold ?? threshold,
+        failCount: 0,
+        // giữ threshold base (existing.threshold)
+        threshold: (existing as any).threshold ?? thresholdBase,
       } as any,
     });
 
-    return {
-      ok: true,
-      dateKey,
-      threshold: updated.threshold ?? threshold,
-      passed: false,
-      passedAt: null,
-      bestScore: 0,
-      rerollCount: (updated as any).rerollCount ?? (rerollCount + 1),
-      rerollLimit: limit,
-      phrase: {
-        vocabId: updated.vocabId ?? null,
-        zh: updated.phraseZh,
-        pinyin: updated.phrasePinyin,
-        vi: updated.phraseVi,
-      },
-    };
+    return this.getDailyGate(userId);
   }
 
   /**
    * Client-side chấm điểm (SpeechRecognition) rồi submit score lên server để
    * đồng bộ multi-device.
+   *
+   * Auto-easy:
+   * - nếu fail => tăng failCount để threshold hiệu lực giảm dần
+   * - có sàn thresholdFloor
    */
   async submitDailyGate(
     userId: string,
@@ -609,7 +736,8 @@ export class StudyService {
     const now = new Date();
     const today = startOfLocalDay(now);
     const dateKey = (body?.dateKey || '').trim() || dateKeyLocal(today);
-    const threshold = this.getDailyGateThreshold();
+
+    const thresholdBaseDefault = this.getDailyGateThresholdBase();
 
     const score = clampInt(body?.score, 0, 100, 0);
     const transcript = (body?.transcript || '').toString().slice(0, 500);
@@ -618,14 +746,11 @@ export class StudyService {
       where: { userId_dateKey: { userId, dateKey } },
     });
 
-    const shouldPass = score >= (existing?.threshold ?? threshold);
-    const nextBest = Math.max(existing?.bestScore ?? 0, score);
-
     // If missing, create from provided fields (or fetch by vocabId)
-    let phraseZh = existing?.phraseZh;
-    let phrasePinyin = existing?.phrasePinyin;
-    let phraseVi = existing?.phraseVi;
-    let vocabId: number | null | undefined = existing?.vocabId ?? null;
+    let phraseZh = (existing as any)?.phraseZh;
+    let phrasePinyin = (existing as any)?.phrasePinyin;
+    let phraseVi = (existing as any)?.phraseVi;
+    let vocabId: number | null | undefined = (existing as any)?.vocabId ?? null;
 
     if (!existing) {
       if (typeof body?.vocabId === 'number' && Number.isFinite(body.vocabId)) {
@@ -646,7 +771,12 @@ export class StudyService {
       phrasePinyin = phrasePinyin || (body?.pinyin || '').toString() || 'ni hao';
       phraseVi = phraseVi || (body?.vi || '').toString() || 'xin chào';
 
-      const created = await this.prisma.dailyGate.create({
+      const base = thresholdBaseDefault;
+      const effective = this.computeEffectiveThreshold(base, 0);
+      const shouldPass = score >= effective;
+      const failCount = shouldPass ? 0 : 1;
+
+      await this.prisma.dailyGate.create({
         data: {
           userId,
           dateKey,
@@ -654,39 +784,56 @@ export class StudyService {
           phraseZh,
           phrasePinyin,
           phraseVi,
-          threshold,
-          bestScore: nextBest,
+          threshold: base,
+          bestScore: score,
           lastTranscript: transcript || null,
           passedAt: shouldPass ? now : null,
-        },
+          failCount,
+          rerollCount: 0,
+          skipUsed: false,
+        } as any,
       });
 
-      return {
-        ok: true,
-        dateKey: created.dateKey,
-        threshold: created.threshold,
-        passed: !!created.passedAt,
-        bestScore: created.bestScore,
-        passedAt: created.passedAt,
-      };
+      return this.getDailyGate(userId);
     }
 
-    const updated = await this.prisma.dailyGate.update({
-      where: { id: existing.id },
+    const base = (existing as any).threshold ?? thresholdBaseDefault;
+    const prevFail = (existing as any).failCount ?? 0;
+
+    // Nếu đã pass rồi, chỉ cập nhật bestScore/transcript, không tăng failCount
+    if (existing.passedAt) {
+      const nextBest = Math.max((existing as any).bestScore ?? 0, score);
+
+      await this.prisma.dailyGate.update({
+        where: { id: (existing as any).id },
+        data: {
+          bestScore: nextBest,
+          lastTranscript: transcript || (existing as any).lastTranscript,
+        } as any,
+      });
+
+      return this.getDailyGate(userId);
+    }
+
+    const effective = this.computeEffectiveThreshold(base, prevFail);
+    const shouldPass = score >= effective;
+    const nextBest = Math.max((existing as any).bestScore ?? 0, score);
+
+    // Fail => tăng failCount để lần sau auto-easy
+    // Nếu user đã skip, không tăng failCount (vì đã "đường thoát")
+    const skipUsed = !!(existing as any).skipUsed;
+    const nextFail = shouldPass ? prevFail : skipUsed ? prevFail : prevFail + 1;
+
+    await this.prisma.dailyGate.update({
+      where: { id: (existing as any).id },
       data: {
         bestScore: nextBest,
-        lastTranscript: transcript || existing.lastTranscript,
-        passedAt: existing.passedAt ? existing.passedAt : shouldPass ? now : null,
-      },
+        lastTranscript: transcript || (existing as any).lastTranscript,
+        passedAt: shouldPass ? now : null,
+        failCount: nextFail,
+      } as any,
     });
 
-    return {
-      ok: true,
-      dateKey: updated.dateKey,
-      threshold: updated.threshold,
-      passed: !!updated.passedAt,
-      bestScore: updated.bestScore,
-      passedAt: updated.passedAt,
-    };
+    return this.getDailyGate(userId);
   }
 }

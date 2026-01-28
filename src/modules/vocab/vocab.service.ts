@@ -71,21 +71,17 @@ export class VocabService {
       return this.prisma.vocab.findUnique({ where: { id: pick.vocabId } });
     }
 
-    // random unseen
-    const progressed = await this.prisma.userVocabProgress.findMany({
-      where: { userId },
-      select: { vocabId: true },
-    });
-    const progressedIds = progressed.map((x) => x.vocabId);
+    // random unseen (do NOT fetch all progressed ids; use relation filter for performance)
+    const unseenWhere = { userVocabProgress: { none: { userId } } };
 
     const unseenCount = await this.prisma.vocab.count({
-      where: progressedIds.length ? { id: { notIn: progressedIds } } : {},
+      where: unseenWhere,
     });
 
     if (unseenCount > 0) {
       const skip = Math.floor(Math.random() * unseenCount);
       return this.prisma.vocab.findFirst({
-        where: progressedIds.length ? { id: { notIn: progressedIds } } : {},
+        where: unseenWhere,
         orderBy: { id: 'asc' },
         skip,
       });
