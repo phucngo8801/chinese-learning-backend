@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 
 const MAX_BOX = 6;
@@ -242,7 +242,63 @@ export class VocabService {
     return { selected: true };
   }
 
-  // ✅ CREATE + AUTO ADD MY LIST
+  /**
+   * Bulk add/remove many vocabIds to/from My List in ONE request.
+   * Used by FE "Chọn tất cả / Bỏ tất cả / Thêm tất cả (trang) / Bỏ tất cả (trang)".
+   */
+  async bulkSetMyList(
+    userId: string,
+    body: { action: 'add' | 'remove'; vocabIds: number[] },
+  ) {
+    if (!userId) throw new BadRequestException('Missing userId');
+
+    const action = body?.action === 'remove' ? 'remove' : 'add';
+    const rawIds = Array.isArray(body?.vocabIds) ? body.vocabIds : [];
+    const ids = Array.from(
+      new Set(
+        rawIds
+          .map((x) => Number(x))
+          .filter((x) => Number.isFinite(x))
+          .map((x) => Math.round(x))
+          .filter((x) => x > 0),
+      ),
+    );
+
+    // Guardrails to prevent accidental huge payloads that could spike DB.
+    // If you need more, call multiple times (pagination).
+    if (ids.length === 0) return { ok: true, action, requested: 0, affected: 0 };
+    if (ids.length > 5000) {
+      throw new BadRequestException('Tối đa 5000 từ mỗi lần thao tác.');
+    }
+
+    if (action === 'add') {
+      const res = await this.prisma.userVocab.createMany({
+        data: ids.map((vocabId) => ({ userId, vocabId })),
+        skipDuplicates: true,
+      });
+
+      return {
+        ok: true,
+        action,
+        requested: ids.length,
+        affected: res.count ?? 0,
+      };
+    }
+
+    // remove
+    const res = await this.prisma.userVocab.deleteMany({
+      where: { userId, vocabId: { in: ids } },
+    });
+
+    return {
+      ok: true,
+      action,
+      requested: ids.length,
+      affected: res.count ?? 0,
+    };
+  }
+
+// ✅ CREATE + AUTO ADD MY LIST
   async createVocabForUser(
     userId: string,
     body: {

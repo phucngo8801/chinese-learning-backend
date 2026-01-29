@@ -128,6 +128,12 @@ model DailyGate {
   threshold      Int      @default(80)
   bestScore      Int      @default(0)
   rerollCount    Int      @default(0)
+
+  // ✅ thêm vào để khớp StudyService
+  failCount      Int      @default(0)
+  skipUsed       Boolean  @default(false)
+  skippedAt      DateTime?
+
   passedAt       DateTime?
   lastTranscript String?
   createdAt      DateTime @default(now())
@@ -139,6 +145,7 @@ model DailyGate {
   @@unique([userId, dateKey])
   @@index([userId, passedAt])
 }
+
 
 model UserVocabProgress {
   id         Int      @id @default(autoincrement())

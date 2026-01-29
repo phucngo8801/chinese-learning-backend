@@ -73,6 +73,16 @@ export class VocabController {
     return this.vocabService.toggleMyList(userId, body.vocabId);
   }
 
+@Post('my-list/bulk')
+bulkSetMyList(
+  @Req() req: any,
+  @Body() body: { action: 'add' | 'remove'; vocabIds: number[] },
+) {
+  const userId = req.user?.id;
+  return this.vocabService.bulkSetMyList(userId, body);
+}
+
+
   @Post('result')
   async result(
     @Req() req: any,
